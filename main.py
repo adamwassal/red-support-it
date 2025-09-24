@@ -9,7 +9,118 @@ import customtkinter as ctk
 from PIL import Image
 import psutil
 import cpuinfo
-import pyopencl as cl
+import subprocess
+import json
+
+
+# ========== GPU detection ==========
+def get_gpus():
+    gpus = []
+
+    # NVIDIA via pynvml
+    try:
+        from pynvml import (
+            nvmlInit,
+            nvmlDeviceGetCount,
+            nvmlDeviceGetHandleByIndex,
+            nvmlDeviceGetName,
+            nvmlDeviceGetMemoryInfo,
+            nvmlShutdown,
+        )
+
+        nvmlInit()
+        count = nvmlDeviceGetCount()
+        for i in range(count):
+            h = nvmlDeviceGetHandleByIndex(i)
+            name = nvmlDeviceGetName(h)
+            if isinstance(name, bytes):
+                name = name.decode()
+            mem = nvmlDeviceGetMemoryInfo(h)
+            gpus.append(
+                {
+                    "vendor": "NVIDIA",
+                    "model": name,
+                    "memory_mib": mem.total // (1024**2),
+                }
+            )
+        nvmlShutdown()
+        if gpus:
+            return gpus
+    except Exception:
+        pass
+
+    # Windows WMI
+    if platform.system() == "Windows":
+        try:
+            import wmi
+
+            c = wmi.WMI()
+            for gpu in c.Win32_VideoController():
+                name = getattr(gpu, "Name", "Unknown")
+                ram = getattr(gpu, "AdapterRAM", 0)
+                mem_mib = int(ram) // (1024**2) if ram else None
+                gpus.append(
+                    {
+                        "vendor": getattr(gpu, "AdapterCompatibility", "Unknown"),
+                        "model": name,
+                        "memory_mib": mem_mib,
+                    }
+                )
+            if gpus:
+                return gpus
+        except Exception:
+            pass
+
+    # macOS system_profiler
+    if platform.system() == "Darwin":
+        try:
+            out = subprocess.check_output(
+                ["system_profiler", "SPDisplaysDataType", "-json"], text=True
+            )
+            data = json.loads(out)
+            displays = data.get("SPDisplaysDataType", [])
+            for d in displays:
+                name = d.get("sppci_model", d.get("_name", "Unknown"))
+                vram = d.get("spdisplays_vram", None)  # e.g. "1536 MB"
+                mem_mib = None
+                if vram:
+                    digits = "".join(ch for ch in vram if (ch.isdigit() or ch == "."))
+                    try:
+                        mem_mib = int(float(digits))
+                    except:
+                        mem_mib = None
+                gpus.append(
+                    {
+                        "vendor": d.get("sppci_vendor", "Apple"),
+                        "model": name,
+                        "memory_mib": mem_mib,
+                    }
+                )
+            if gpus:
+                return gpus
+        except Exception:
+            pass
+
+    # Linux lspci
+    if platform.system() == "Linux":
+        try:
+            out = subprocess.check_output(["lspci", "-nnk"], text=True)
+            lines = out.splitlines()
+            for line in lines:
+                if ("VGA compatible controller" in line) or ("3D controller" in line):
+                    parts = line.split(":", 2)
+                    model = parts[2].strip() if len(parts) >= 3 else line.strip()
+                    gpus.append({"vendor": None, "model": model, "memory_mib": None})
+            if gpus:
+                return gpus
+        except Exception:
+            pass
+
+    # fallback
+    if not gpus:
+        gpus.append({"vendor": None, "model": "Unknown GPU", "memory_mib": None})
+
+    return gpus
 
 
 # ========== helper: resource_path ==========
@@ -34,18 +145,7 @@ try:
     info = cpuinfo.get_cpu_info()
     ip = s.getsockname()[0]
     partitions = psutil.disk_partitions()
-    gpus = []
-
-    for plat in cl.get_platforms():
-        for dev in plat.get_devices():
-            infogpu = {
-                "platform": plat.name,
-                "vendor": dev.vendor,
-                "model": dev.name,
-                "driver": dev.driver_version,
-                "global_mem_mib": dev.global_mem_size // (1024**2),
-            }
-            gpus.append(infogpu)
+    gpus = get_gpus()
 
     gateway = "Unknown"
     gws = psutil.net_if_addrs()
@@ -58,6 +158,7 @@ try:
 except OSError:
     print("please check your connection!")
     user = mac_address = gateway = ip = info = "Check your connection!"
+    gpus = [{"model": "Unknown GPU", "memory_mib": None}]
 
 
 # ================== Screenshot ==================
@@ -88,13 +189,34 @@ def screenshot_tk_window(window, output_filename="window_screenshot.png"):
         print(f"Error: {e}")
 
 
-# # ====== الصف 2: Disk ======
+# ====== الصف 2: Disk ======
 if platform.system() == "Windows":
     system_partition = os.environ["SystemDrive"] + "\\"
 else:
     system_partition = "/"
 
 usage = psutil.disk_usage(system_partition)
+
+
+def format_gpu_model(raw_model: str) -> str:
+    if not raw_model:
+        return "Unknown GPU"
+
+    model = raw_model
+
+    # شيل "Intel Corporation"
+    model = model.replace("Intel Corporation", "Intel")
+
+    # شيل الأكواد بين [] والـ (rev ...)
+    import re
+
+    model = re.sub(r"\[.*?\]", "", model)  # يمسح [8086:5917]
+    model = re.sub(r"\(rev.*?\)", "", model)  # يمسح (rev 07)
+
+    # شيل المسافات الزايدة
+    model = " ".join(model.split())
+
+    return model
 
 
 # ================== Create Report ==================
@@ -111,10 +233,12 @@ def create_file():
         file.write(
             f"Memory         : {round(psutil.virtual_memory().total / (1024**3))} GB\n"
         )
-        file.write(
-            f"Graphics       : {gpus[0]['model']}  "
-            f"({int(gpus[0]['global_mem_mib'] / 1024)} GB)\n\n"
-        )
+
+        gpu_model = gpus[0].get("model", "Unknown")
+        gpu_mem = gpus[0].get("memory_mib")
+        gpu_mem_gb = (gpu_mem // 1024) if gpu_mem else "N/A"
+
+        file.write(f"Graphics       : {gpu_model} ({gpu_mem_gb} GB)\n\n")
 
         # Disk Info
         file.write("----------- Storage -----------\n")
@@ -135,7 +259,6 @@ def create_file():
 
     print(f"Report saved as {output_filename}")
 
-    # Open file depending on OS
     if platform.system() == "Windows":
         os.startfile(output_filename)
     elif platform.system() == "Darwin":
@@ -143,26 +266,6 @@ def create_file():
     else:
         os.system(f"xdg-open '{output_filename}'")
 
-
-# add_info_grid("Processor:", info["brand_raw"], 0, 1, "cyan")
-
-# add_info_grid(
-#     "Memory:", f"{round(psutil.virtual_memory().total / (1024**3))} GB", 1, 0, "red"
-# )
-#     add_info_grid("Graphics:", f"{gpus[0]["model"]}  /  {int(gpus[0]['global_mem_mib'] / 1024)}GB", 1, 1, "orange")
-
-
-# add_info_grid("Disk:", f"{usage.total // (1024**3)} GB", 2, 0, "cyan")
-# add_info_grid(
-#     "Used/Free:",
-#     f"{usage.used // (1024**3)} GB / {usage.free // (1024**3)} GB",
-#     2,
-#     1,
-#     "yellow",
-# )
-
-# add_info_grid("IP Address:", ip, 3, 0, "orange")
-# add_info_grid("Gateway:", gateway, 3, 1, "yellow")
 
 # ================== UI ==================
 win = ctk.CTk()
@@ -208,17 +311,15 @@ def add_info_grid(
     value_bg="black",
     colspan=1,
 ):
-    # ====== Card frame ======
     card = ctk.CTkFrame(
         info_frame,
         corner_radius=8,
-        fg_color="gray15",  # الخلفية العامة للبطاقة
+        fg_color="gray15",
     )
     card.grid(row=row, column=col, padx=10, pady=5, sticky="ew", columnspan=colspan)
 
-    card.grid_columnconfigure(1, weight=1)  # يخلي القيمة تتمدد
+    card.grid_columnconfigure(1, weight=1)
 
-    # ===== العنوان =====
     label_title = ctk.CTkLabel(
         card,
         text=title,
@@ -230,7 +331,6 @@ def add_info_grid(
     )
     label_title.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-    # ===== القيمة =====
     label_value = ctk.CTkLabel(
         card,
         text=value,
@@ -250,16 +350,23 @@ add_info_grid("Processor:", info["brand_raw"], 0, 1, "cyan")
 
 # ====== الصف 1: Memory - Graphics ======
 add_info_grid(
-    "Memory:", f"{round(psutil.virtual_memory().total / (1024**3))} GB", 1, 0, "red"
+    "Memory:", f"{round(psutil.virtual_memory().total / (1024**3))} GB RAM", 1, 0, "red"
 )
-if gpus:
-    add_info_grid(
-        "Graphics:",
-        f"{gpus[0]['model']}  /  {int(gpus[0]['global_mem_mib'] / 1024)}GB",
-        1,
-        1,
-        "orange",
-    )
+print(gpus)
+gpu_model_raw = gpus[0].get("model", "Unknown")
+gpu_model = format_gpu_model(gpu_model_raw)
+
+gpu_mem = gpus[0].get("memory_mib")
+
+if gpu_mem and gpu_mem > 0:
+    gpu_mem_str = f"{gpu_mem // 1024} GB"
+else:
+    # Intel / AMD iGPU غالباً بياخد من الرام
+    total_ram_gb = round(psutil.virtual_memory().total / (1024**3))
+    gpu_mem_str = f"Shared ({total_ram_gb} GB RAM)"
+
+
+add_info_grid("Graphics:", f"{gpu_model} / {gpu_mem_str}", 1, 1, "orange")
 
 # ====== الصف 2: Disk ======
 add_info_grid("Disk:", f"{usage.total // (1024**3)} GB", 2, 0, "cyan")
@@ -275,13 +382,8 @@ add_info_grid(
 add_info_grid("IP Address:", ip, 3, 0, "orange")
 add_info_grid("Gateway:", gateway, 3, 1, "yellow")
 
-# ====== الصف 4: MAC Address (وسط) ======
-# ===== MAC Address Card =====
-mac_card = ctk.CTkFrame(
-    info_frame,
-    corner_radius=10,
-    fg_color="gray15",  # خلفية الكارد
-)
+# ====== الصف 4: MAC Address ======
+mac_card = ctk.CTkFrame(info_frame, corner_radius=10, fg_color="gray15")
 mac_card.grid(row=4, column=0, columnspan=2, pady=15, sticky="ew")
 
 mac_label = ctk.CTkLabel(
@@ -294,8 +396,7 @@ mac_label = ctk.CTkLabel(
     padx=10,
     pady=8,
 )
-mac_label.pack(padx=10, pady=10, expand=True)  # يحطه في النص
-
+mac_label.pack(padx=10, pady=10, expand=True)
 
 # ====== Buttons ======
 button_frame = ctk.CTkFrame(win, corner_radius=10)
