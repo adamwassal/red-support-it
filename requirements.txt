@@ -1,0 +1,7 @@
+customtkinter
+Pillow
+psutil
+py-cpuinfo
+getmac
+pyautogui
+pyopencl
