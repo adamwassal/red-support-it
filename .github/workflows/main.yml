@@ -1,36 +1,31 @@
-name: Build EXE with PyInstaller
+name: Build Windows EXE
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  build:
+  pyinstaller-build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Create Executable
+        uses: sayyid5416/pyinstaller@v1
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
-
-      - name: Build EXE
-        run: |
-          pyinstaller --noconsole --onefile --add-data "logo.png;." main.py
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: exe-build
-          path: dist/*.exe
+          python_ver: '3.11'
+          spec: 'main.py'
+          requirements: 'requirements.txt'
+          upload_exe_with_name: 'Red Support It'
+          options: >
+            --onefile
+            --windowed
+            --noconsole
+            --name "Red Support It"
+            --add-data "logo.png;."
