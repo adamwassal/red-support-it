@@ -255,7 +255,7 @@ add_info_grid(
 if gpus:
     add_info_grid(
         "Graphics:",
-        f"{gpus[0]["model"]}  /  {int(gpus[0]['global_mem_mib'] / 1024)}GB",
+        f"{gpus[0]['model']}  /  {int(gpus[0]['global_mem_mib'] / 1024)}GB",
         1,
         1,
         "orange",
